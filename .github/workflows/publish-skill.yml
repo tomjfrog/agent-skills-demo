@@ -131,7 +131,7 @@ jobs:
         id: create-rb
         env:
           RB_NAME: agent-skills-${{ steps.skill.outputs.slug }}-release-bundle
-          RB_VER: ${{ steps.skill.outputs.version }}.${{ github.run_number }}
+          RB_VER: ${{ github.run_number }}
         run: |
           set -euo pipefail
           # JF_RELEASE_BUNDLE_SIGNING_KEY_PATH: value depends on RBv2 setup (e.g. GPG key id, signing key path, or platform-specific id — see JFrog Release Lifecycle Management CLI docs).
