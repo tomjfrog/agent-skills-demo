@@ -1,0 +1,190 @@
+# Skills publish, GitHub build provenance, Release Bundle v2, and JFrog Evidence.
+# See README.md (GitHub Actions — skill publish) for required vars and secrets.
+
+name: Publish Single Skill with Release Bundle and Evidence
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+  artifact-metadata: write
+
+env:
+  JF_PROJECT: agentskills
+  SKILLS_REPO: agentskills-skills-dev-local
+  SKILL_DIR: add-github-build-provenance
+  JF_URL: ${{ vars.JF_URL }}
+  # Optional label for docs; `jf rbc` uses agent-skills-<slug>-release-bundle (see Create Release Bundle step).
+  RELEASE_BUNDLE_NAME: add-github-build-provenance-skill-bundle
+
+jobs:
+  publish-skills-pipeline:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup JFrog CLI (OIDC)
+        id: setup-jfrog-cli
+        uses: jfrog/setup-jfrog-cli@v4
+        env:
+          JF_URL: ${{ env.JF_URL }}
+          JF_PROJECT: ${{ env.JF_PROJECT }}
+        with:
+          version: 2.98.0
+          oidc-provider-name: ${{ vars.JFROG_OIDC_PROVIDER_NAME }}
+          oidc-audience: ${{ vars.JFROG_OIDC_AUDIENCE }}
+
+      - name: Parse SKILL.md slug and version
+        id: skill
+        run: |
+          set -euo pipefail
+          FRONT="${{ env.SKILL_DIR }}/SKILL.md"
+          SLUG=$(awk 'BEGIN{p=0} /^---$/{p++; next} p==1 && /^name:/{sub(/^name:[[:space:]]*/,""); print; exit}' "$FRONT")
+          VER=$(awk 'BEGIN{p=0} /^---$/{p++; next} p==1 && /^version:/{sub(/^version:[[:space:]]*/,""); print; exit}' "$FRONT")
+          echo "slug=${SLUG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Signing Key
+        id: prepare-signing-key
+        env:
+          JF_EVD_PRIVATE_KEY_MATERIAL: ${{ secrets.JF_EVD_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          KEY_FILE="${{ runner.temp }}/jf-evd-signing.key"
+          echo "$JF_EVD_PRIVATE_KEY_MATERIAL" > "$KEY_FILE"
+          chmod 600 "$KEY_FILE"
+          echo "JF_EVD_SIGNING_KEY_FILE=$KEY_FILE" >> "$GITHUB_ENV"
+
+      # The Scan is skipped due to the pre-release status of Skills security scanning
+      # A future release of the JFrog Platform will include this scan as a pre-publish check
+      - name: Publish skill to Artifactory Skills repository
+        env:
+          JF_EVD_PUBLIC_KEY_ALIAS: ${{ secrets.JF_EVD_PUBLIC_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          jf skills publish "${{ github.workspace }}/${{ env.SKILL_DIR }}" \
+            --repo "${{ env.SKILLS_REPO }}" \
+            --signing-key "$JF_EVD_SIGNING_KEY_FILE" \
+            --key-alias "$JF_EVD_PUBLIC_KEY_ALIAS" \
+            --version ${{ github.run_number }} \
+            --skip-scan
+
+      # Storage path uses the published semver from --version above (= run_number), not SKILL.md version alone.
+      - name: Resolve published artifact path and SHA256 digest
+        id: published
+        run: |
+          set -euo pipefail
+          REPO="${{ env.SKILLS_REPO }}"
+          SLUG="${{ steps.skill.outputs.slug }}"
+          VER="${{ github.run_number }}"
+          REL_PATH="${SLUG}/${VER}/${SLUG}-${VER}.zip"
+          echo "Expected Artifactory storage path: ${REPO}/${REL_PATH}"
+          JSON=$(jf rt curl -sS "api/storage/${REPO}/${REL_PATH}")
+          SHA256=$(echo "$JSON" | jq -r '.checksums.sha256 // empty')
+          if [ -z "$SHA256" ] || [ "$SHA256" = "null" ]; then
+            echo "Could not read sha256 from storage metadata"
+            echo "$JSON"
+            exit 1
+          fi
+          echo "rel_path=${REL_PATH}" >> "$GITHUB_OUTPUT"
+          echo "digest=sha256:${SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest GitHub build provenance (published skill zip)
+        uses: actions/attest-build-provenance@v3
+        if: false
+        with:
+          subject-name: ${{ env.SKILLS_REPO }}/${{ steps.published.outputs.rel_path }}
+          subject-digest: ${{ steps.published.outputs.digest }}
+
+      # File Spec with `aql.items.find` per JFrog Release Bundle creation / Using File Specs
+      # (same criteria shape as AQL: repo + path + name). Only one AQL block allowed per spec.
+      - name: Generate Release Bundle File Spec
+        id: generate-rb-spec
+        run: |
+          set -euo pipefail
+          RB_SPEC_FILE="${{ runner.temp }}/rb-spec.json"
+          REPO="${{ env.SKILLS_REPO }}"
+          SLUG="${{ steps.skill.outputs.slug }}"
+          VER="${{ github.run_number }}"
+          ITEM_PATH="${SLUG}/${VER}"
+          ITEM_NAME="${SLUG}-${VER}.zip"
+          jq -n \
+            --arg repo "$REPO" \
+            --arg path "$ITEM_PATH" \
+            --arg name "$ITEM_NAME" \
+            '{
+              files: [{
+                aql: {
+                  "items.find": {
+                    repo: $repo,
+                    path: $path,
+                    name: $name
+                  }
+                }
+              }]
+            }' > "$RB_SPEC_FILE"
+          echo "RB_SPEC_FILE=$RB_SPEC_FILE" >> "$GITHUB_ENV"
+
+      - name: Create Release Bundle v2 from spec
+        id: create-rb
+        env:
+          RB_NAME: agent-skills-${{ steps.skill.outputs.slug }}-release-bundle
+          RB_VER: ${{ steps.skill.outputs.version }}.${{ github.run_number }}
+        run: |
+          set -euo pipefail
+          # JF_RELEASE_BUNDLE_SIGNING_KEY_PATH: value depends on RBv2 setup (e.g. GPG key id, signing key path, or platform-specific id — see JFrog Release Lifecycle Management CLI docs).
+          jf rbc \
+            --spec="$RB_SPEC_FILE" \
+            --sync=true \
+            --project="${{ env.JF_PROJECT }}" \
+            --signing-key="${{ secrets.JF_RELEASE_BUNDLE_SIGNING_KEY_PATH }}" \
+            "${{ env.RB_NAME }}" "${{ env.RB_VER }}"
+
+      - name: Write Custom Evidence Predicate for Release Bundle
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg workflow '${{ github.workflow }}' \
+            --arg run_id '${{ github.run_id }}' \
+            --arg sha '${{ github.sha }}' \
+            --arg skill_slug '${{ steps.skill.outputs.slug }}' \
+            --arg skill_version '${{ steps.skill.outputs.version }}' \
+            '{
+              workflow: $workflow,
+              run_id: $run_id,
+              sha: $sha,
+              skill_slug: $skill_slug,
+              skill_version: $skill_version,
+              note: "Demo / pipeline evidence attached to Release Bundle v2"
+            }' > "${{ runner.temp }}/rb-evidence.json"
+
+      - name: Attach Evidence to Release Bundle
+        env:
+          JF_EVD_PUBLIC_KEY_ALIAS: ${{ secrets.JF_EVD_PUBLIC_KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          RB_NAME="agent-skills-${{ steps.skill.outputs.slug }}-release-bundle"
+          RB_VER="${{ steps.skill.outputs.version }}.${{ github.run_number }}"
+          jf evd create \
+            --release-bundle "$RB_NAME" \
+            --release-bundle-version "$RB_VER" \
+            --predicate "${{ runner.temp }}/rb-evidence.json" \
+            --predicate-type "https://jfrog.com/evidence/my-custom-type/v1" \
+            --key "$JF_EVD_SIGNING_KEY_FILE" \
+            --key-alias "$JF_EVD_PUBLIC_KEY_ALIAS" \
+            --project "${{ env.JF_PROJECT }}"
+
+      - name: Promote Release Bundle to DEV
+        run: |
+          set -euo pipefail
+          RB_NAME="agent-skills-${{ steps.skill.outputs.slug }}-release-bundle"
+          RB_VER="${{ steps.skill.outputs.version }}.${{ github.run_number }}"
+          jf rbp \
+            --signing-key="${{ secrets.JF_RELEASE_BUNDLE_SIGNING_KEY_PATH }}" \
+            --project="${{ env.JF_PROJECT }}" \
+            --sync=true \
+            "$RB_NAME" "$RB_VER" DEV
