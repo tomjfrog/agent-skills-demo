@@ -166,7 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           RB_NAME="agent-skills-${{ steps.skill.outputs.slug }}-release-bundle"
-          RB_VER="${{ steps.skill.outputs.version }}.${{ github.run_number }}"
+          RB_VER="${{ github.run_number }}"
           jf evd create \
             --release-bundle "$RB_NAME" \
             --release-bundle-version "$RB_VER" \
