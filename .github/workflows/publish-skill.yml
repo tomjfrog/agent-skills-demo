@@ -15,10 +15,10 @@ permissions:
 env:
   JF_PROJECT: agentskills
   SKILLS_REPO: agentskills-skills-dev-local
-  SKILL_DIR: add-github-build-provenance
+  SKILL_DIR: jfrog-maven-xray-audit
   JF_URL: ${{ vars.JF_URL }}
   # Optional label for docs; `jf rbc` uses agent-skills-<slug>-release-bundle (see Create Release Bundle step).
-  RELEASE_BUNDLE_NAME: add-github-build-provenance-skill-bundle
+  RELEASE_BUNDLE_NAME: jfrog-maven-xray-audit-skill-bundle
 
 jobs:
   publish-skills-pipeline:
