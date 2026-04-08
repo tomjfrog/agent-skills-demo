@@ -38,7 +38,7 @@ jobs:
           oidc-provider-name: ${{ vars.JFROG_OIDC_PROVIDER_NAME }}
           oidc-audience: ${{ vars.JFROG_OIDC_AUDIENCE }}
 
-      - name: Parse SKILL.md slug and version
+      - name: Parse SKILL.md slug
         id: skill
         run: |
           set -euo pipefail
@@ -90,6 +90,15 @@ jobs:
           fi
           echo "rel_path=${REL_PATH}" >> "$GITHUB_OUTPUT"
           echo "digest=sha256:${SHA256}" >> "$GITHUB_OUTPUT"
+
+      - name: Set custom properties on published skill artifact
+        run: |
+          set -euo pipefail
+          PATTERN="${{ env.SKILLS_REPO }}/${{ steps.published.outputs.rel_path }}"
+          PROPS='capability=Automated Security Scanning;domain=Security;owner=Tom Johander;runtime=Bash;model-compatibility=composer-2-fast;trust-level=High'
+          jf rt set-props "$PATTERN" "$PROPS" \
+            --project "${{ env.JF_PROJECT }}" \
+            --recursive=false
 
       - name: Attest GitHub build provenance (published skill zip)
         uses: actions/attest-build-provenance@v3
@@ -150,13 +159,25 @@ jobs:
             --arg run_id '${{ github.run_id }}' \
             --arg sha '${{ github.sha }}' \
             --arg skill_slug '${{ steps.skill.outputs.slug }}' \
-            --arg skill_version '${{ steps.skill.outputs.version }}' \
+            --arg skill_version '${{ github.run_number }}' \
+            --arg capability 'Automated Security Scanning' \
+            --arg domain 'Security' \
+            --arg owner 'Tom Johander' \
+            --arg runtime 'Bash' \
+            --arg model_compatibility 'composer-2-fast' \
+            --arg trust_level 'High' \
             '{
               workflow: $workflow,
               run_id: $run_id,
               sha: $sha,
               skill_slug: $skill_slug,
               skill_version: $skill_version,
+              capability: $capability,
+              domain: $domain,
+              owner: $owner,
+              runtime: $runtime,
+              "model-compatibility": $model_compatibility,
+              "trust-level": $trust_level,
               note: "Demo / pipeline evidence attached to Release Bundle v2"
             }' > "${{ runner.temp }}/rb-evidence.json"
 
